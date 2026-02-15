@@ -984,32 +984,37 @@ function catchPlayerOrb(isClean) {
 function handleHits() {
   const now = performance.now();
 
-  // --- Player orb hitting opponent (SINGLE PLAYER ONLY) ---
-  // In multiplayer, the remote player detects hits on themselves
-  if (!gameState.multiplayerActive) {
-    if (!playerOrb.state.isHeld && !playerOrb.state.recalling && !playerOrb.state.returning) {
-      if (opponent.state.alive && !opponent.state.dissolving) {
-        const timeSinceThrow = now - playerOrb.state.throwTime;
-        if (timeSinceThrow > CONFIG.HIT_GRACE_PERIOD_MS) {
-          if (now - gameState.lastOppHitTime > CONFIG.SCORE_DEBOUNCE_MS) {
-            const speed = playerOrb.state.velocity.length();
-            if (speed > CONFIG.SCORE_MIN_SPEED) {
-              const dist = playerOrb.state.position.distanceTo(opponent.state.position);
-              if (dist < CONFIG.OPP_HIT_RADIUS) {
-                gameState.lastOppHitTime = now;
+  // --- Player orb hitting opponent (BOTH MODES) ---
+  // In multiplayer: local prediction for instant visual feedback, server handles scoring
+  // In singleplayer: local detection handles scoring directly
+  if (!playerOrb.state.isHeld && !playerOrb.state.recalling && !playerOrb.state.returning) {
+    if (opponent.state.alive && !opponent.state.dissolving) {
+      const timeSinceThrow = now - playerOrb.state.throwTime;
+      if (timeSinceThrow > CONFIG.HIT_GRACE_PERIOD_MS) {
+        if (now - gameState.lastOppHitTime > CONFIG.SCORE_DEBOUNCE_MS) {
+          const speed = playerOrb.state.velocity.length();
+          if (speed > CONFIG.SCORE_MIN_SPEED) {
+            const dist = playerOrb.state.position.distanceTo(opponent.state.position);
+            if (dist < CONFIG.OPP_HIT_RADIUS) {
+              gameState.lastOppHitTime = now;
+              playerOrb.state.strikeStacks = 0;
+              dissolveOpponent(opponent, particles, audio);
+              startRecall(playerOrb);
+              gameState.shakeTimer = 0.15;
+              if (!gameState.multiplayerActive) {
                 const scorer = playerOrb.state.owner === 'player' ? 'player' : 'opponent';
-                playerOrb.state.strikeStacks = 0;
-                dissolveOpponent(opponent, particles, audio);
-                startRecall(playerOrb);
-                gameState.shakeTimer = 0.15;
                 scorePoint(scorer);
               }
+              // In multiplayer, scoring is handled by the server when
+              // the opponent reports 'i_got_hit' — we just show effects instantly
             }
           }
         }
       }
     }
+  }
 
+  if (!gameState.multiplayerActive) {
     // --- Opponent orb (reflected by parry) hitting opponent ---
     if (!opponentOrb.state.isHeld && !opponentOrb.state.recalling && !opponentOrb.state.returning) {
       if (opponent.state.alive && !opponent.state.dissolving) {
@@ -1754,10 +1759,12 @@ if (network) {
 
   network.callbacks.onOpponentEvent = (event) => {
     if (event.name === 'i_got_hit') {
-      // Opponent reports being hit — play dissolve on our screen
-      dissolveOpponent(opponent, particles, audio);
-      startRecall(playerOrb);
-      gameState.shakeTimer = 0.15;
+      // Opponent confirms being hit — dissolve if we haven't already (prediction)
+      if (!opponent.state.dissolving) {
+        dissolveOpponent(opponent, particles, audio);
+        startRecall(playerOrb);
+        gameState.shakeTimer = 0.15;
+      }
     } else if (event.name === 'my_shield_deflected_your_orb') {
       // Our orb was deflected by opponent's shield
       // Event velocity is already mirrored by network.js
