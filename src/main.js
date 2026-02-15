@@ -1702,7 +1702,8 @@ if (network) {
     showOverlay('DISCONNECTED', 'RECONNECTING...');
     // Try to reconnect after 3s
     setTimeout(() => {
-      const wsUrl = import.meta.env.VITE_WS_URL || 'ws://localhost:8080';
+      const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = import.meta.env.VITE_WS_URL || `${wsProtocol}//${window.location.host}`;
       network.connect(wsUrl);
     }, 3000);
   };
@@ -1835,7 +1836,8 @@ if (network) {
   showOverlay('ARC', 'CONNECTING...');
   if (instructions) instructions.style.opacity = '0';
   updateNetworkUI('connecting');
-  const wsUrl = import.meta.env.VITE_WS_URL || 'ws://localhost:8080';
+  const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const wsUrl = import.meta.env.VITE_WS_URL || `${wsProtocol}//${window.location.host}`;
   network.connect(wsUrl);
 } else {
   // Single player — original flow
