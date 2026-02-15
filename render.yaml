@@ -2,10 +2,26 @@ services:
   - type: web
     name: arc-server
     runtime: node
+    region: frankfurt
     rootDir: server
     buildCommand: npm install
     startCommand: npm start
     envVars:
       - key: NODE_ENV
         value: production
+    plan: free
+
+  - type: web
+    name: arc-game
+    runtime: static
+    region: frankfurt
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    envVars:
+      - key: VITE_WS_URL
+        value: wss://arc-server-acr2.onrender.com
+    headers:
+      - path: /*
+        name: Cache-Control
+        value: public, max-age=0, must-revalidate
     plan: free
