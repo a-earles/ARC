@@ -1,11 +1,5 @@
 import { WebSocketServer } from 'ws';
 import http from 'http';
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DIST_DIR = path.join(__dirname, '..', 'dist');
 
 const PORT = process.env.PORT || 8080;
 const POINTS_TO_WIN = 7;
@@ -13,60 +7,13 @@ const ROUNDS_TO_WIN = 2;
 const RESET_DELAY = 1200;
 const BETWEEN_ROUNDS_DELAY = 2500;
 
-const MIME_TYPES = {
-  '.html': 'text/html',
-  '.js':   'application/javascript',
-  '.css':  'text/css',
-  '.json': 'application/json',
-  '.png':  'image/png',
-  '.jpg':  'image/jpeg',
-  '.svg':  'image/svg+xml',
-  '.ico':  'image/x-icon',
-  '.woff': 'font/woff',
-  '.woff2':'font/woff2',
-  '.mp3':  'audio/mpeg',
-  '.ogg':  'audio/ogg',
-  '.wav':  'audio/wav',
-  '.glb':  'model/gltf-binary',
-  '.gltf': 'model/gltf+json',
-  '.wasm': 'application/wasm',
-};
-
 const server = http.createServer((req, res) => {
   // Health check endpoint
-  if (req.url === '/health') {
-    res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('ARC server running');
-    return;
-  }
-
-  // Serve static files from dist/
-  let filePath = path.join(DIST_DIR, req.url === '/' ? 'index.html' : req.url);
-  // Prevent directory traversal
-  if (!filePath.startsWith(DIST_DIR)) {
-    res.writeHead(403);
-    res.end();
-    return;
-  }
-
-  fs.stat(filePath, (err, stats) => {
-    if (err || !stats.isFile()) {
-      // SPA fallback — serve index.html for any unknown route
-      filePath = path.join(DIST_DIR, 'index.html');
-    }
-
-    fs.readFile(filePath, (err2, data) => {
-      if (err2) {
-        res.writeHead(500);
-        res.end('Server error');
-        return;
-      }
-      const ext = path.extname(filePath).toLowerCase();
-      const contentType = MIME_TYPES[ext] || 'application/octet-stream';
-      res.writeHead(200, { 'Content-Type': contentType });
-      res.end(data);
-    });
+  res.writeHead(200, {
+    'Content-Type': 'text/plain',
+    'Access-Control-Allow-Origin': '*',
   });
+  res.end('ARC server running');
 });
 
 const wss = new WebSocketServer({ server });

@@ -3,8 +3,9 @@ services:
     name: arc-server
     runtime: node
     region: frankfurt
-    buildCommand: npm install && npm run build && cd server && npm install
-    startCommand: node server/index.js
+    rootDir: server
+    buildCommand: npm install
+    startCommand: npm start
     envVars:
       - key: NODE_ENV
         value: production
