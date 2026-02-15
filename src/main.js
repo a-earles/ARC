@@ -12,6 +12,14 @@ import { initInput, getInputState, updateInput, tickInput, getFlickDelta } from 
 import { createAudio } from './audio.js';
 import { createParticles, updateParticles } from './particles.js';
 import { createOpponent, updateOpponent, dissolveOpponent } from './opponent.js';
+import { createNetwork } from './network.js';
+
+// =============================================
+// MULTIPLAYER DETECTION
+// =============================================
+const urlParams = new URLSearchParams(window.location.search);
+const singlePlayerMode = urlParams.has('sp');
+const network = singlePlayerMode ? null : createNetwork();
 
 // =============================================
 // RENDERER
@@ -175,6 +183,9 @@ const gameState = {
 
   // Title screen
   started: false,
+
+  // Multiplayer
+  multiplayerActive: false,
 };
 
 const playerVelocity = new THREE.Vector3();
@@ -733,6 +744,14 @@ function handleThrow(input) {
   gameState.throws++;
   updateHUD();
   audio.play('throw');
+
+  if (network && network.isConnected()) {
+    network.sendEvent({
+      name: 'throw',
+      orbX: ds.position.x, orbY: ds.position.y, orbZ: ds.position.z,
+      orbVx: ds.velocity.x, orbVy: ds.velocity.y, orbVz: ds.velocity.z,
+    });
+  }
 }
 
 // =============================================
@@ -797,6 +816,17 @@ function handleShieldReflections() {
     if (result) {
       opponentOrb.state.owner = 'player';
       opponentOrb.state.lastDeflectedBy = 'player';
+
+      // In multiplayer, notify opponent their orb was deflected
+      if (gameState.multiplayerActive && network) {
+        network.sendEvent({
+          name: 'my_shield_deflected_your_orb',
+          orbVx: opponentOrb.state.velocity.x,
+          orbVy: opponentOrb.state.velocity.y,
+          orbVz: opponentOrb.state.velocity.z,
+          isParry: result.isParry,
+        });
+      }
 
       if (result.isParry) {
         audio.play('parry');
@@ -954,23 +984,47 @@ function catchPlayerOrb(isClean) {
 function handleHits() {
   const now = performance.now();
 
-  // --- Player orb hitting opponent ---
-  if (!playerOrb.state.isHeld && !playerOrb.state.recalling && !playerOrb.state.returning) {
-    if (opponent.state.alive && !opponent.state.dissolving) {
-      const timeSinceThrow = now - playerOrb.state.throwTime;
-      if (timeSinceThrow > CONFIG.HIT_GRACE_PERIOD_MS) {
-        if (now - gameState.lastOppHitTime > CONFIG.SCORE_DEBOUNCE_MS) {
-          const speed = playerOrb.state.velocity.length();
-          if (speed > CONFIG.SCORE_MIN_SPEED) {
-            const dist = playerOrb.state.position.distanceTo(opponent.state.position);
-            if (dist < CONFIG.OPP_HIT_RADIUS) {
-              gameState.lastOppHitTime = now;
-              const scorer = playerOrb.state.owner === 'player' ? 'player' : 'opponent';
-              playerOrb.state.strikeStacks = 0;
-              dissolveOpponent(opponent, particles, audio);
-              startRecall(playerOrb);
-              gameState.shakeTimer = 0.15;
-              scorePoint(scorer);
+  // --- Player orb hitting opponent (SINGLE PLAYER ONLY) ---
+  // In multiplayer, the remote player detects hits on themselves
+  if (!gameState.multiplayerActive) {
+    if (!playerOrb.state.isHeld && !playerOrb.state.recalling && !playerOrb.state.returning) {
+      if (opponent.state.alive && !opponent.state.dissolving) {
+        const timeSinceThrow = now - playerOrb.state.throwTime;
+        if (timeSinceThrow > CONFIG.HIT_GRACE_PERIOD_MS) {
+          if (now - gameState.lastOppHitTime > CONFIG.SCORE_DEBOUNCE_MS) {
+            const speed = playerOrb.state.velocity.length();
+            if (speed > CONFIG.SCORE_MIN_SPEED) {
+              const dist = playerOrb.state.position.distanceTo(opponent.state.position);
+              if (dist < CONFIG.OPP_HIT_RADIUS) {
+                gameState.lastOppHitTime = now;
+                const scorer = playerOrb.state.owner === 'player' ? 'player' : 'opponent';
+                playerOrb.state.strikeStacks = 0;
+                dissolveOpponent(opponent, particles, audio);
+                startRecall(playerOrb);
+                gameState.shakeTimer = 0.15;
+                scorePoint(scorer);
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // --- Opponent orb (reflected by parry) hitting opponent ---
+    if (!opponentOrb.state.isHeld && !opponentOrb.state.recalling && !opponentOrb.state.returning) {
+      if (opponent.state.alive && !opponent.state.dissolving) {
+        if (opponentOrb.state.owner === 'player') {
+          if (now - gameState.lastOppHitTime > CONFIG.SCORE_DEBOUNCE_MS) {
+            const speed = opponentOrb.state.velocity.length();
+            if (speed > CONFIG.SCORE_MIN_SPEED) {
+              const dist = opponentOrb.state.position.distanceTo(opponent.state.position);
+              if (dist < CONFIG.OPP_HIT_RADIUS) {
+                gameState.lastOppHitTime = now;
+                opponentOrb.state.strikeStacks = 0;
+                dissolveOpponent(opponent, particles, audio);
+                gameState.shakeTimer = 0.15;
+                scorePoint('player');
+              }
             }
           }
         }
@@ -978,33 +1032,16 @@ function handleHits() {
     }
   }
 
-  // --- Opponent orb (reflected by parry) hitting opponent ---
-  if (!opponentOrb.state.isHeld && !opponentOrb.state.recalling && !opponentOrb.state.returning) {
-    if (opponent.state.alive && !opponent.state.dissolving) {
-      if (opponentOrb.state.owner === 'player') {
-        if (now - gameState.lastOppHitTime > CONFIG.SCORE_DEBOUNCE_MS) {
-          const speed = opponentOrb.state.velocity.length();
-          if (speed > CONFIG.SCORE_MIN_SPEED) {
-            const dist = opponentOrb.state.position.distanceTo(opponent.state.position);
-            if (dist < CONFIG.OPP_HIT_RADIUS) {
-              gameState.lastOppHitTime = now;
-              opponentOrb.state.strikeStacks = 0;
-              dissolveOpponent(opponent, particles, audio);
-              gameState.shakeTimer = 0.15;
-              scorePoint('player');
-            }
-          }
-        }
-      }
-    }
-  }
-
-  // --- Opponent orb hitting player ---
+  // --- Opponent orb hitting player (BOTH MODES) ---
   if (!opponentOrb.state.isHeld && !opponentOrb.state.recalling && !opponentOrb.state.returning) {
     const timeSinceThrow = now - opponentOrb.state.throwTime;
-    if (timeSinceThrow > CONFIG.HIT_GRACE_PERIOD_MS) {
+    // In multiplayer, skip throwTime grace (orb is positioned from network, throwTime isn't synced)
+    const graceOk = gameState.multiplayerActive || timeSinceThrow > CONFIG.HIT_GRACE_PERIOD_MS;
+    if (graceOk) {
       if (now - gameState.lastPlayerHitTime > CONFIG.SCORE_DEBOUNCE_MS) {
-        if (opponentOrb.state.owner === 'opponent') {
+        // In multiplayer, skip owner check (opponent orb is always opponent's)
+        const ownerOk = gameState.multiplayerActive || opponentOrb.state.owner === 'opponent';
+        if (ownerOk) {
           const speed = opponentOrb.state.velocity.length();
           if (speed > CONFIG.SCORE_MIN_SPEED) {
             const dist = opponentOrb.state.position.distanceTo(gameState.playerPos);
@@ -1015,8 +1052,14 @@ function handleHits() {
               gameState.hitFlashTimer = 0.2;
               if (hitFlash) hitFlash.style.opacity = '0.6';
               gameState.shakeTimer = 0.2;
-              startRecall(opponentOrb);
-              scorePoint('opponent');
+
+              if (gameState.multiplayerActive && network) {
+                // Tell server we got hit — server handles scoring
+                network.sendEvent({ name: 'i_got_hit' });
+              } else {
+                startRecall(opponentOrb);
+                scorePoint('opponent');
+              }
             }
           }
         }
@@ -1040,14 +1083,16 @@ function handleStrikeZones() {
     }
   }
 
-  if (!opponentOrb.state.isHeld && !opponentOrb.state.recalling && !opponentOrb.state.returning) {
-    if (opponentOrb.state.owner === 'opponent') {
-      if (checkStrikeZone(strikeZones, 'player', opponentOrb.state)) {
-        if (gameState.opponentStrikes < CONFIG.STRIKE_MAX_STACKS) {
-          gameState.opponentStrikes++;
-          opponentOrb.state.strikeStacks = gameState.opponentStrikes;
-          audio.play('strike');
-          updateHUD();
+  if (!gameState.multiplayerActive) {
+    if (!opponentOrb.state.isHeld && !opponentOrb.state.recalling && !opponentOrb.state.returning) {
+      if (opponentOrb.state.owner === 'opponent') {
+        if (checkStrikeZone(strikeZones, 'player', opponentOrb.state)) {
+          if (gameState.opponentStrikes < CONFIG.STRIKE_MAX_STACKS) {
+            gameState.opponentStrikes++;
+            opponentOrb.state.strikeStacks = gameState.opponentStrikes;
+            audio.play('strike');
+            updateHUD();
+          }
         }
       }
     }
@@ -1222,6 +1267,63 @@ function updateBetweenRounds(dt) {
 }
 
 // =============================================
+// MULTIPLAYER — NETWORK OPPONENT STATE
+// =============================================
+let latestOpponentData = null;
+
+function applyNetworkOpponentState(data, dt) {
+  const lerpFactor = Math.min(1, 15 * dt);
+
+  // Interpolate position
+  opponent.state.position.x += (data.px - opponent.state.position.x) * lerpFactor;
+  opponent.state.position.y += (data.py - opponent.state.position.y) * lerpFactor;
+  opponent.state.position.z += (data.pz - opponent.state.position.z) * lerpFactor;
+
+  // Smooth yaw interpolation
+  let yawDiff = data.yaw - opponent.state.yaw;
+  while (yawDiff > Math.PI) yawDiff -= Math.PI * 2;
+  while (yawDiff < -Math.PI) yawDiff += Math.PI * 2;
+  opponent.state.yaw += yawDiff * lerpFactor;
+
+  // Discrete states
+  opponent.state.blocking = data.blocking;
+  opponent.state.armed = data.armed;
+  opponent.state.dashActive = data.dashActive;
+
+  // Update visual model
+  opponent.bodyGroup.position.set(
+    opponent.state.position.x,
+    opponent.state.position.y - CONFIG.PLAYER_EYE_HEIGHT + 0.5,
+    opponent.state.position.z
+  );
+  opponent.bodyGroup.rotation.y = opponent.state.yaw;
+  opponent.bodyGroup.visible = true;
+}
+
+function applyNetworkOpponentOrb(data, dt) {
+  const ds = opponentOrb.state;
+  ds.isHeld = data.orbHeld;
+  ds.strikeStacks = data.orbStrikeStacks;
+  ds.returning = data.orbReturning;
+
+  if (!ds.isHeld) {
+    // Interpolate orb position for smooth visuals
+    const lerpFactor = Math.min(1, 20 * dt);
+    ds.position.x += (data.orbX - ds.position.x) * lerpFactor;
+    ds.position.y += (data.orbY - ds.position.y) * lerpFactor;
+    ds.position.z += (data.orbZ - ds.position.z) * lerpFactor;
+    ds.velocity.set(data.orbVx, data.orbVy, data.orbVz);
+
+    // Sync physics body position for shield collision detection
+    opponentOrb.body.position.set(ds.position.x, ds.position.y, ds.position.z);
+    opponentOrb.body.velocity.set(ds.velocity.x, ds.velocity.y, ds.velocity.z);
+  }
+
+  // Update opponent strike stacks for HUD
+  gameState.opponentStrikes = data.orbStrikeStacks;
+}
+
+// =============================================
 // GAME LOOP
 // =============================================
 const clock = new THREE.Clock();
@@ -1282,7 +1384,9 @@ function gameLoop() {
     if (!opponentOrb.state.isHeld) updateOrbFlight(opponentOrb, dt);
 
     // Opponent dissolve/respawn still ticks
-    updateOpponent(opponent, playerOrb, opponentOrb, gameState.playerPos, dt, audio, particles);
+    if (!gameState.multiplayerActive) {
+      updateOpponent(opponent, playerOrb, opponentOrb, gameState.playerPos, dt, audio, particles);
+    }
 
     // Hit flash decay
     if (gameState.hitFlashTimer > 0) {
@@ -1339,6 +1443,30 @@ function gameLoop() {
   updatePlayer(dt, input);
   handleThrow(input);
 
+  // Send state to server (multiplayer)
+  if (network && network.isConnected()) {
+    network.sendState({
+      px: gameState.playerPos.x,
+      py: gameState.playerPos.y,
+      pz: gameState.playerPos.z,
+      yaw: gameState.cameraYaw,
+      pitch: gameState.cameraPitch,
+      blocking: gameState.blocking,
+      crouching: gameState.crouching,
+      dashActive: gameState.dashActive,
+      armed: gameState.playerArmed,
+      orbHeld: playerOrb.state.isHeld,
+      orbX: playerOrb.state.position.x,
+      orbY: playerOrb.state.position.y,
+      orbZ: playerOrb.state.position.z,
+      orbVx: playerOrb.state.velocity.x,
+      orbVy: playerOrb.state.velocity.y,
+      orbVz: playerOrb.state.velocity.z,
+      orbReturning: playerOrb.state.returning,
+      orbStrikeStacks: playerOrb.state.strikeStacks,
+    });
+  }
+
   // Update shields BEFORE physics so collision detection sees correct positions
   updateShield(playerShield, gameState.playerPos, gameState.cameraYaw, gameState.cameraPitch, gameState.blocking, gameState.playerArmed);
   updateShield(opponentShield, opponent.state.position, opponent.state.yaw, 0, opponent.state.blocking, opponent.state.armed);
@@ -1350,7 +1478,7 @@ function gameLoop() {
     if (!playerOrb.state.isHeld && !playerOrb.state.recalling && !playerOrb.state.returning) {
       maxSpeed = Math.max(maxSpeed, playerOrb.state.velocity.length());
     }
-    if (!opponentOrb.state.isHeld && !opponentOrb.state.recalling && !opponentOrb.state.returning) {
+    if (!gameState.multiplayerActive && !opponentOrb.state.isHeld && !opponentOrb.state.recalling && !opponentOrb.state.returning) {
       maxSpeed = Math.max(maxSpeed, opponentOrb.state.velocity.length());
     }
 
@@ -1361,7 +1489,7 @@ function gameLoop() {
     if (!playerOrb.state.recalling && !playerOrb.state.returning) {
       syncOrbPhysics(physics, playerOrb, onPlayerOrbBounce);
     }
-    if (!opponentOrb.state.recalling && !opponentOrb.state.returning) {
+    if (!gameState.multiplayerActive && !opponentOrb.state.recalling && !opponentOrb.state.returning) {
       syncOrbPhysics(physics, opponentOrb, onOpponentOrbBounce);
     }
 
@@ -1370,7 +1498,9 @@ function gameLoop() {
 
   // Process shield reflections AFTER physics
   handleShieldReflections();
-  handleOpponentShieldReflections();
+  if (!gameState.multiplayerActive) {
+    handleOpponentShieldReflections();
+  }
 
   // Auto-return arc (back wall bounce → homing arc → auto-catch)
   if (handleOrbReturn(playerOrb, gameState.playerPos, dt)) {
@@ -1379,24 +1509,28 @@ function gameLoop() {
     playerOrb.state.returnTimer = 0;
     catchPlayerOrb(false);
   }
-  if (handleOrbReturn(opponentOrb, opponent.state.position, dt)) {
-    // Auto-catch opponent orb
-    opponentOrb.state.isHeld = true;
-    opponentOrb.state.velocity.set(0, 0, 0);
-    opponentOrb.state.returning = false;
-    opponentOrb.state.returnTimer = 0;
-    opponentOrb.state.recalling = false;
-    opponentOrb.state.stallTimer = 0;
-    opponentOrb.body.position.set(opponent.state.position.x, opponent.state.position.y, opponent.state.position.z);
-    opponentOrb.body.velocity.set(0, 0, 0);
-    opponentOrb.body.angularVelocity.set(0, 0, 0);
-    flushBounceQueue(opponentOrb);
-    opponent.state.armed = true;
+  if (!gameState.multiplayerActive) {
+    if (handleOrbReturn(opponentOrb, opponent.state.position, dt)) {
+      // Auto-catch opponent orb
+      opponentOrb.state.isHeld = true;
+      opponentOrb.state.velocity.set(0, 0, 0);
+      opponentOrb.state.returning = false;
+      opponentOrb.state.returnTimer = 0;
+      opponentOrb.state.recalling = false;
+      opponentOrb.state.stallTimer = 0;
+      opponentOrb.body.position.set(opponent.state.position.x, opponent.state.position.y, opponent.state.position.z);
+      opponentOrb.body.velocity.set(0, 0, 0);
+      opponentOrb.body.angularVelocity.set(0, 0, 0);
+      flushBounceQueue(opponentOrb);
+      opponent.state.armed = true;
+    }
   }
 
   // Recall (skip if orb is already in auto-return arc)
   if (!playerOrb.state.returning) handleRecall(playerOrb, gameState.playerPos, dt);
-  if (!opponentOrb.state.returning) handleRecall(opponentOrb, opponent.state.position, dt);
+  if (!gameState.multiplayerActive && !opponentOrb.state.returning) {
+    handleRecall(opponentOrb, opponent.state.position, dt);
+  }
   gameState.discRecalling = playerOrb.state.recalling;
 
   // Orb visuals
@@ -1446,7 +1580,14 @@ function gameLoop() {
   updateStrikeZones(strikeZones, dt);
 
   // Opponent
-  updateOpponent(opponent, playerOrb, opponentOrb, gameState.playerPos, dt, audio, particles);
+  if (gameState.multiplayerActive) {
+    if (latestOpponentData) {
+      applyNetworkOpponentState(latestOpponentData, dt);
+      applyNetworkOpponentOrb(latestOpponentData, dt);
+    }
+  } else {
+    updateOpponent(opponent, playerOrb, opponentOrb, gameState.playerPos, dt, audio, particles);
+  }
 
   // Particles
   updateParticles(particles, dt);
@@ -1517,17 +1658,197 @@ updateHUD();
   hiddenMeshes.forEach(obj => { obj.visible = false; });
 }
 
-// Show title screen — wait for first pointer lock to start countdown
-gameState.matchPhase = 'title';
-showOverlay('ARC', 'CLICK TO START');
-if (instructions) instructions.style.opacity = '0';
+// =============================================
+// NETWORK UI ELEMENTS
+// =============================================
+const netStatus = document.getElementById('net-status');
+const netIndicator = document.getElementById('net-indicator');
+const netText = document.getElementById('net-text');
 
-document.addEventListener('pointerlockchange', () => {
-  if (document.pointerLockElement && !gameState.started) {
-    gameState.started = true;
-    if (instructions) instructions.style.opacity = '1';
-    startCountdown();
+function updateNetworkUI(status) {
+  if (!netStatus) return;
+  netStatus.style.display = 'block';
+  switch (status) {
+    case 'connecting':
+      netIndicator.style.background = '#aa8800';
+      netText.textContent = 'CONNECTING';
+      break;
+    case 'queued':
+      netIndicator.style.background = '#aa8800';
+      netText.textContent = 'IN QUEUE';
+      break;
+    case 'matched':
+      netIndicator.style.background = '#00cc66';
+      netText.textContent = 'CONNECTED';
+      break;
+    case 'disconnected':
+      netIndicator.style.background = '#cc3300';
+      netText.textContent = 'DISCONNECTED';
+      break;
   }
-});
+}
+
+// =============================================
+// NETWORK CALLBACKS (multiplayer)
+// =============================================
+if (network) {
+  network.callbacks.onConnected = () => {
+    updateNetworkUI('queued');
+  };
+
+  network.callbacks.onDisconnected = () => {
+    updateNetworkUI('disconnected');
+    gameState.multiplayerActive = false;
+    showOverlay('DISCONNECTED', 'RECONNECTING...');
+    // Try to reconnect after 3s
+    setTimeout(() => {
+      const wsUrl = import.meta.env.VITE_WS_URL || 'ws://localhost:8080';
+      network.connect(wsUrl);
+    }, 3000);
+  };
+
+  network.callbacks.onQueueUpdate = (position, total) => {
+    updateNetworkUI('queued');
+    if (position === 1 && total === 1) {
+      showOverlay('ARC', 'WAITING FOR OPPONENT...');
+    } else {
+      showOverlay('ARC', `IN QUEUE — POSITION ${position}`);
+    }
+  };
+
+  network.callbacks.onMatchFound = (slot) => {
+    updateNetworkUI('matched');
+    gameState.multiplayerActive = true;
+    gameState.started = true;
+    hideOverlay();
+    if (instructions) instructions.style.opacity = '1';
+    // Request pointer lock
+    renderer.domElement.requestPointerLock({ unadjustedMovement: true }).catch(() => {
+      renderer.domElement.requestPointerLock();
+    });
+  };
+
+  network.callbacks.onCountdown = (timer) => {
+    gameState.matchPhase = 'countdown';
+    gameState.countdownTimer = timer;
+    showOverlay(String(timer), `ROUND ${gameState.round}`);
+    audio.play('countdown');
+  };
+
+  network.callbacks.onGo = () => {
+    showOverlay('GO', '');
+    audio.play('go');
+    setTimeout(() => {
+      gameState.matchPhase = 'playing';
+      hideOverlay();
+    }, 400);
+  };
+
+  network.callbacks.onResume = () => {
+    gameState.matchPhase = 'playing';
+  };
+
+  network.callbacks.onOpponentState = (mirrored) => {
+    latestOpponentData = mirrored;
+  };
+
+  network.callbacks.onOpponentEvent = (event) => {
+    if (event.name === 'i_got_hit') {
+      // Opponent reports being hit — play dissolve on our screen
+      dissolveOpponent(opponent, particles, audio);
+      startRecall(playerOrb);
+      gameState.shakeTimer = 0.15;
+    } else if (event.name === 'my_shield_deflected_your_orb') {
+      // Our orb was deflected by opponent's shield
+      // Event velocity is already mirrored by network.js
+      playerOrb.state.velocity.set(event.orbVx, event.orbVy, event.orbVz);
+      playerOrb.body.velocity.set(event.orbVx, event.orbVy, event.orbVz);
+      playerOrb.state.owner = 'opponent';
+      playerOrb.state.lastDeflectedBy = 'opponent';
+      audio.play(event.isParry ? 'parry' : 'deflect');
+    }
+  };
+
+  network.callbacks.onScoreUpdate = (msg) => {
+    const mySlot = network.getSlot();
+    gameState.playerScore = mySlot === 0 ? msg.p1 : msg.p2;
+    gameState.opponentScore = mySlot === 0 ? msg.p2 : msg.p1;
+    gameState.playerRounds = mySlot === 0 ? msg.rounds_p1 : msg.rounds_p2;
+    gameState.opponentRounds = mySlot === 0 ? msg.rounds_p2 : msg.rounds_p1;
+    gameState.round = msg.round;
+    updateHUD();
+
+    // Score pop animation
+    if (hudScore) {
+      hudScore.classList.remove('pop');
+      void hudScore.offsetWidth;
+      hudScore.classList.add('pop');
+    }
+  };
+
+  network.callbacks.onRoundEnd = (msg) => {
+    const mySlot = network.getSlot();
+    const iWon = (msg.winner === 'p1' && mySlot === 0) || (msg.winner === 'p2' && mySlot === 1);
+    gameState.playerRounds = mySlot === 0 ? msg.rounds_p1 : msg.rounds_p2;
+    gameState.opponentRounds = mySlot === 0 ? msg.rounds_p2 : msg.rounds_p1;
+    gameState.matchPhase = 'between-rounds';
+    showOverlay(iWon ? 'ROUND WON' : 'ROUND LOST',
+      `${gameState.playerScore} - ${gameState.opponentScore}`);
+    audio.play(iWon ? 'roundWin' : 'roundLose');
+    updateHUD();
+  };
+
+  network.callbacks.onMatchEnd = (msg) => {
+    const mySlot = network.getSlot();
+    const iWon = (msg.winner === 'p1' && mySlot === 0) || (msg.winner === 'p2' && mySlot === 1);
+    gameState.playerRounds = mySlot === 0 ? msg.rounds_p1 : msg.rounds_p2;
+    gameState.opponentRounds = mySlot === 0 ? msg.rounds_p2 : msg.rounds_p1;
+    gameState.matchPhase = 'match-over';
+    showOverlay(iWon ? 'YOU WIN' : 'DEFEAT',
+      `ROUNDS  ${gameState.playerRounds} - ${gameState.opponentRounds}`);
+    audio.play(iWon ? 'roundWin' : 'roundLose');
+    updateHUD();
+    // After 3s, server handles winner-stays-on
+    // The client will receive either 'matched' or 'queued' message
+  };
+
+  network.callbacks.onResetPositions = () => {
+    resetPositions();
+    updateHUD();
+  };
+
+  network.callbacks.onOpponentDisconnected = () => {
+    gameState.multiplayerActive = false;
+    latestOpponentData = null;
+    showOverlay('OPPONENT LEFT', 'RETURNING TO QUEUE...');
+    // Server will send a 'queued' message shortly
+  };
+}
+
+// =============================================
+// START
+// =============================================
+gameState.matchPhase = 'title';
+
+if (network) {
+  // Multiplayer — connect to server
+  showOverlay('ARC', 'CONNECTING...');
+  if (instructions) instructions.style.opacity = '0';
+  updateNetworkUI('connecting');
+  const wsUrl = import.meta.env.VITE_WS_URL || 'ws://localhost:8080';
+  network.connect(wsUrl);
+} else {
+  // Single player — original flow
+  showOverlay('ARC', 'CLICK TO START');
+  if (instructions) instructions.style.opacity = '0';
+
+  document.addEventListener('pointerlockchange', () => {
+    if (document.pointerLockElement && !gameState.started) {
+      gameState.started = true;
+      if (instructions) instructions.style.opacity = '1';
+      startCountdown();
+    }
+  });
+}
 
 gameLoop();

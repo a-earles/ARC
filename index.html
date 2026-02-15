@@ -251,6 +251,17 @@
       color: rgba(200, 210, 220, 0.4);
       pointer-events: none; z-index: 10; letter-spacing: 1px;
     ">-- FPS</div>
+    <!-- Network status (multiplayer) -->
+    <div id="net-status" style="
+      position: fixed; top: 8px; left: 12px;
+      font-family: 'Courier New', monospace; font-size: 11px;
+      color: rgba(200, 210, 220, 0.5);
+      pointer-events: none; z-index: 10; letter-spacing: 1px;
+      display: none;
+    ">
+      <span id="net-indicator" style="display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #555; margin-right: 6px; vertical-align: middle;"></span>
+      <span id="net-text">OFFLINE</span>
+    </div>
     <div id="instructions">CLICK TO START &mdash; MOUSE TO AIM &mdash; WASD TO MOVE<br>LEFT CLICK THROW &mdash; RIGHT CLICK SHIELD &mdash; SHIFT DASH<br>SPACE JUMP &mdash; C CROUCH &mdash; E CATCH &mdash; ESC UNLOCK</div>
     <script type="module" src="/src/main.js"></script>
   </body>
